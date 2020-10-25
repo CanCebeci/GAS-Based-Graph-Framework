@@ -3,11 +3,11 @@
 #include "simple_graph.hpp"
 #include "async_engine.hpp"
 
-#include "graphlab/vertex_program/ivertex_program.hpp"
+#include "graphlab/graphlab.hpp"
 
 using namespace std;
 
-typedef Graph<double, double> graph_type;
+typedef Graph<double, graphlab::empty> graph_type;
 
 class pagerank_program :
              public graphlab::ivertex_program<graph_type, double> {
@@ -54,10 +54,10 @@ int main() {
     g.add_vertex(2, 0.0);
     g.add_vertex(3, 0.0);
 
-    g.add_edge(1, 2, -1.0);
-    g.add_edge(1, 3, -1.0);
-    g.add_edge(2, 3, -1.0);
-    g.add_edge(3, 2, -1.0);
+    g.add_edge(1, 2);
+    g.add_edge(1, 3);
+    g.add_edge(2, 3);
+    g.add_edge(3, 2);
 
     async_engine<pagerank_program> engine(g);
     engine.signal_all();

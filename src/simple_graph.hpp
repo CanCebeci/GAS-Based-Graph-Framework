@@ -4,7 +4,7 @@
  *    using direct references instead of vertex id's might eliminate
  *    retrieval time from the map.
  * 
- *  - Make things default constructible as in GraphLab. 
+ *  - Force things to be default constructible as in GraphLab. 
  * 
  *  - Vertices and edges store data directly, not a pointer.
  *    might make sense to fix this to avert possible copying overhead.
@@ -101,7 +101,7 @@ public:
     Graph() {vertices = std::unordered_map<vertex_id_type, vertex_type *>();}
 
     // return false if vid already exists
-    bool add_vertex(const vertex_id_type& vid, const VertexData& vdata) {
+    bool add_vertex(const vertex_id_type& vid, const VertexData& vdata = VertexData()) {
         // TODO: VertexData must be default constructable.
         if (vertices.count(vid) == 0) {
             vertices[vid] = new vertex_type(vid, vdata);
@@ -113,7 +113,7 @@ public:
 
     // returns false if self-edge or vid's don't exist.
     bool add_edge(vertex_id_type source, vertex_id_type target,
-                  const EdgeData& edata) {
+                  const EdgeData& edata = EdgeData()) {
         if (source == target || vertices.count(source) == 0 || vertices.count(target) == 0) {
             return false;
         }
