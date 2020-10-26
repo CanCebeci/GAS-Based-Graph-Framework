@@ -6,6 +6,7 @@
 #include "graphlab/vertex_program/context.hpp"
 
 #include <unordered_set>
+#include <unordered_map>
 #include <type_traits>  //for is_base_of
 #include <iostream>
 
@@ -23,12 +24,23 @@ public:
     typedef typename graph_type::edge_type edge_type;
     typedef typename graph_type::vertex_id_type vertex_id_type;
     typedef graphlab::context<async_engine> context_type;
+    typedef graphlab::edge_dir_type edge_dir_type;
 
     graph_type& g;
-
     std::unordered_set<vertex_id_type> activeList;  // possibly replace later with better data structure
 
-    async_engine(graph_type& g): g(g) {
+    bool caching_enabled;
+    /**
+     * GraphLab uses vectors instead of maps for gather_cache and has_cache,
+     * which also enables the use of the special vector<graphlab::empty>
+     * However, this implementation does not use local vertex id's and the global
+     * vertex id's are not necessarily consecutive. Thus, a map is used instead.
+     */
+    std::unordered_map<vertex_id_type, gather_type> gather_cache;  
+    std::unordered_map<vertex_id_type, bool> has_cache;             //          IMPORTANT: are bools default initialized to false?
+
+
+    async_engine(graph_type& g, bool enable_caching = false): g(g), caching_enabled(enable_caching) {
         if (!std::is_base_of<graphlab::ivertex_program<graph_type, gather_type>, VertexProgram>::value) {
             throw "type parameter for async egnine is not derived from graphlab::ivertex_program";
         }
@@ -39,6 +51,8 @@ public:
 
     // called by context
     void internal_signal(const vertex_type& vertex);
+    void internal_post_delta(const vertex_type& vertex, const gather_type& delta);
+    void internal_clear_gather_cache(const vertex_type& vertex);
 };
 
 /**
@@ -53,6 +67,22 @@ void async_engine<VertexProgram>::internal_signal(const vertex_type& vertex) {
         activeList.insert(vertex.id());
     }
 }
+
+template<typename VertexProgram>
+void async_engine<VertexProgram>::
+internal_post_delta(const vertex_type& vertex, const gather_type& delta) {
+    if(caching_enabled && has_cache[vertex.id()]) {
+        gather_cache[vertex.id()] += delta;
+    }
+}
+
+template<typename VertexProgram>
+void async_engine<VertexProgram>::
+internal_clear_gather_cache(const vertex_type& vertex) {
+    if(caching_enabled && has_cache[vertex.id()]) {
+        has_cache[vertex.id()] == false;
+    }
+} // end of clear_gather_cache
 
 template<typename VertexProgram>
 void async_engine<VertexProgram>::signal_all() {
@@ -76,6 +106,7 @@ void async_engine<VertexProgram>::start() {
     while (!activeList.empty()) {
         // instantiate vertex program
         VertexProgram vprog;
+
         vertex_id_type cur_vid = *(activeList.begin());
         activeList.erase(cur_vid);
         vertex_type& cur = g.vertex(cur_vid);
@@ -85,67 +116,68 @@ void async_engine<VertexProgram>::start() {
         /**
          * -----  GATHER PHASE  -----  
          */
-        list<edge_type *> gather_edges;
+        bool accum_is_set = false;
+        gather_type accum = gather_type();  // imporant to explicitly call the default constructor for basic data types
+                                            // when gather_type is double, int, bool etc...
 
-        /**
-         *  adapter from the gather_edges enum to actual lists of edge pointers
-         *  probably will not be needed in less naive implementationsi
-         */
-        switch (vprog.gather_edges(context, cur)) {
-        case graphlab::NO_EDGES:
-            gather_edges = list<edge_type*>();
-            break;
-        case graphlab::IN_EDGES:
-            gather_edges = cur.in_edges;
-            break;
-        case graphlab::OUT_EDGES:
-            gather_edges = cur.out_edges;
-            break;
-        case graphlab::ALL_EDGES:
-            gather_edges = cur.in_edges;
-            gather_edges.insert(gather_edges.end(), cur.in_edges.begin(), cur.in_edges.end());
-            break;
-        }
+        if (caching_enabled && has_cache[cur_vid]) {
+            accum = gather_cache[cur_vid];
+            accum_is_set = true;
+        } else {
+            const edge_dir_type gather_dir = vprog.gather_edges(context, cur);
 
-        /** TODO: replace with templatized gather type */
-        gather_type acc = 0;    // will not work when gather type is not numerical.    
-        
-        for (edge_type* e : gather_edges) {
-            acc += vprog.gather(context, cur, *e);
+            // Loop over in edges
+            if (gather_dir == graphlab::IN_EDGES || gather_dir == graphlab::ALL_EDGES) {
+                for (edge_type *e : cur.in_edges) {
+                    if (accum_is_set) {
+                        accum += vprog.gather(context, cur, *e);
+                    } else {
+                        accum = vprog.gather(context, cur, *e);
+                        accum_is_set = true;
+                    }
+                }
+            }
+            // Loop over out edges
+            if (gather_dir == graphlab::OUT_EDGES || gather_dir == graphlab::ALL_EDGES) {
+                for (edge_type *e : cur.out_edges) {
+                    if (accum_is_set) {
+                        accum += vprog.gather(context, cur, *e);
+                    } else {
+                        accum = vprog.gather(context, cur, *e);
+                        accum_is_set = true;
+                    }
+                }
+            }
+            // If caching is enabled then save the accumulator to the
+            // cache for future iterations.  Note that it is possible
+            // that the accumulator was never set in which case we are
+            // effectively "zeroing out" the cache.
+            if(caching_enabled && accum_is_set) {
+                gather_cache[cur_vid] = accum; 
+                has_cache[cur_vid] = true;
+            }
         }
 
         /**
          * -----  APPLY PHASE  -----
          */
-        vprog.apply(context, cur, acc);
+        vprog.apply(context, cur, accum);
 
         /**
          * -----  SCATTER PHASE  -----
          */
-        list<edge_type *> scatter_edges;
-
-        /**
-         *  adapter from the scatter_edges enum to actual lists of edge pointers
-         *  probably will not be needed in less naive implementationsi
-         */
-        switch (vprog.scatter_edges(context, cur)) {
-        case graphlab::NO_EDGES:
-            scatter_edges = list<edge_type*>();
-            break;
-        case graphlab::IN_EDGES:
-            scatter_edges = cur.in_edges;
-            break;
-        case graphlab::OUT_EDGES:
-            scatter_edges = cur.out_edges;
-            break;
-        case graphlab::ALL_EDGES:
-            scatter_edges = cur.in_edges;
-            scatter_edges.insert(gather_edges.end(), cur.in_edges.begin(), cur.in_edges.end());
-            break;
-        }
-
-        for (edge_type* e : scatter_edges) {
+        const edge_dir_type scatter_dir = vprog.scatter_edges(context, cur);
+        // Loop over in edges
+        if(scatter_dir == graphlab::IN_EDGES || scatter_dir == graphlab::ALL_EDGES) {
+            for (edge_type *e : cur.in_edges) {
             vprog.scatter(context, cur, *e);
+            }
+        }
+        // Loop over out edges
+        if(scatter_dir == graphlab::OUT_EDGES || scatter_dir == graphlab::ALL_EDGES) {
+          for (edge_type *e : cur.out_edges) {
+            vprog.scatter(context, cur, *e);
+            }
         }
     }
 

@@ -20,16 +20,6 @@
  *
  */
 
-
-/**
- *  ---- Notes by Can Cebeci ----
- * 
- *  This class has been simplified and reduced significanly.
- *  It currently only implements the signal() function.
- *  TODO: implement the rest of the relevant functionalities.
- */
-
-
 #ifndef GRAPHLAB_CONTEXT_HPP
 #define GRAPHLAB_CONTEXT_HPP
 
@@ -91,7 +81,22 @@ namespace graphlab {
     void signal(const vertex_type& vertex, 
                 const message_type& message = message_type()) {
       engine.internal_signal(vertex/**, message*/);
-    }                                              
+    }         
+
+    /**
+     * Post a change to the cached sum for the vertex
+     */
+    void post_delta(const vertex_type& vertex, 
+                    const gather_type& delta) {
+      engine.internal_post_delta(vertex, delta);
+    }
+
+    /**
+     * Invalidate the cached gather on the vertex.
+     */
+    virtual void clear_gather_cache(const vertex_type& vertex) { 
+      engine.internal_clear_gather_cache(vertex);      
+    }                                     
 
   }; // end of context
   

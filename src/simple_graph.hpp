@@ -130,6 +130,10 @@ public:
     vertex_type& vertex(vertex_id_type vid) {
         return *(vertices.at(vid));
     }
+
+    int num_vertices() {
+        return vertices.size();
+    }
 };
 
 #endif
