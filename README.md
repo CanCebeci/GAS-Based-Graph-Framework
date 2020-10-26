@@ -4,9 +4,9 @@ This repository aims to be a simplified, non-distributed implementation of Graph
 # Current Status
 * The simple pagerank program runs correctly.
 
-* The execution scheme of `async_engine` is currently very naive and inefficient. It is to be changed fundamentally soon.
+* The execution scheme of `async_engine` is currently very naive. It may be changed fundamentally soon.
 
-* Many features (such as message passing and gather caching are missing).
+* Some features (such as message passing are missing).
 ---
 A makefile is to be added in upcoming commits. For now, you can simply compile and run the sample program with
 ```
