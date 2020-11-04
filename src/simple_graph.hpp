@@ -100,6 +100,10 @@ public:
     
     Graph() {vertices = std::unordered_map<vertex_id_type, vertex_type *>();}
 
+    /** 
+     * TODO: provide a destructor that de-allocates dynamic memory. 
+     */
+
     // return false if vid already exists
     bool add_vertex(const vertex_id_type& vid, const VertexData& vdata = VertexData()) {
         // TODO: VertexData must be default constructable.

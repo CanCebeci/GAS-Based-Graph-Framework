@@ -1,6 +1,18 @@
 /**
- * TODO: consider replacing active_list, job_queue and running_vertices
- *  with a more appropriate data structure.
+ * Right now, access to vertex and edge data is synchronized with a mechanism
+ * based on the monitor solution to the dining philosophers problem described 
+ * in Operating System Concepts (9th Edition) by Silberschatz, Galvin & Gagne.
+ * 
+ * In the near future, it may be replaced with the Chandy-Misra solution, 
+ * which is used by GraphLab as well.
+ * 
+ * ! For simplicity's sake, everything that needs synchronization uses the
+ * ! same mutex. They all access vertex_states so that is to some degreee 
+ * ! necessary. Think about how this might be resolved. Using a lock for
+ * ! each element in vertex_states might allow deadlocks. 
+ * 
+ * ! Think about limiting the duration of the locks to specific parts of the
+ * ! functions.
  */
 
 #ifndef __ASYNC_ENGINE_H
@@ -12,6 +24,7 @@
 
 #include <unordered_set>
 #include <unordered_map>
+#include <vector>
 #include <type_traits>  //for is_base_of
 #include <iostream>
 
@@ -21,11 +34,11 @@
 
 template<typename VertexProgram>
 class async_engine {
-public:
     // ---------------------------------------- //
     // --------------- TYPEDEFS --------------- //
     // ---------------------------------------- //
-    // -- below are typedefs borrowed from GraphLab's synchronous_engine.hpp
+    // -- mostly borrowed from GraphLab's synchronous_engine.hpp
+public:
     typedef VertexProgram vertex_program_type;
     typedef typename VertexProgram::gather_type gather_type;
     typedef typename VertexProgram::message_type message_type;
@@ -36,16 +49,51 @@ public:
     typedef typename graph_type::edge_type edge_type;
     typedef typename graph_type::vertex_id_type vertex_id_type;
     typedef graphlab::context<async_engine> context_type;
-    typedef graphlab::edge_dir_type edge_dir_type;
+    typedef graphlab::edge_dir_type edge_dir_type;   
 
+    // ---------------------------------------- //
+    // -------------- FUNCTIONS --------------- //
+    // ---------------------------------------- //
+
+    // constructor
+    async_engine(graph_type& g, bool enable_caching = false): g(g), 
+                                                                caching_enabled(enable_caching),
+                                                                context(*this, g), 
+                                                                num_idle_threads(0) {
+        if (!std::is_base_of<graphlab::ivertex_program<graph_type, gather_type>, VertexProgram>::value) {
+            throw "type parameter for async egnine is not derived from graphlab::ivertex_program";
+        }
+
+        for (const auto& t : g.vertices) {
+            vertex_states[t.first] = vertex_state_type::FREE;
+        }
+    }
+
+    // called by the application programmer
+    void signal_all();
+    void start();
+
+    // called by the context
+    void internal_signal(const vertex_type& vertex);
+    void internal_post_delta(const vertex_type& vertex, const gather_type& delta);
+    void internal_clear_gather_cache(const vertex_type& vertex);
+
+
+
+private:
     // ---------------------------------------- //
     // ------------- DATA MEMBERS ------------- //
     // ---------------------------------------- //
-    graph_type& g;
-    std::unordered_set<vertex_id_type> active_list;  // possibly replace later with better data structure
-                                                     // a bitset could be useful if vid's were consecutive.
+    graph_type& g;  // A reference to the input graph.
+
+    /**  
+     * TODO: Possibly replace later with better data structure.
+     * * A bitset could be useful if vid's were consecutive.
+     */
+    std::unordered_set<vertex_id_type> active_list; // The collection of vertices that have not converged yet.
 
     bool caching_enabled;
+
     /**
      * GraphLab uses vectors instead of maps for gather_cache and has_cache,
      * which also enables the use of the special vector<graphlab::empty>
@@ -57,39 +105,23 @@ public:
     std::unordered_map<vertex_id_type, bool> has_cache; // IMPORTANT: are bools default initialized to false?
 
     // creating a separate context for each veertex program is not necessary. This one is used by all of them.
-    context_type context;   
+    context_type context;
 
-    // ---------------------------------------- //
-    // -------------- FUNCTIONS --------------- //
-    // ---------------------------------------- //
-    void signal_all();
-    void start();
-
-    // called by the context
-    void internal_signal(const vertex_type& vertex);
-    void internal_post_delta(const vertex_type& vertex, const gather_type& delta);
-    void internal_clear_gather_cache(const vertex_type& vertex);
-
-    
-    async_engine(graph_type& g, bool enable_caching = false): g(g), 
-                                                                caching_enabled(enable_caching),
-                                                                context(*this, g), 
-                                                                num_idle_threads(0) {
-        if (!std::is_base_of<graphlab::ivertex_program<graph_type, gather_type>, VertexProgram>::value) {
-            throw "type parameter for async egnine is not derived from graphlab::ivertex_program";
-        }
-    }
-
-private:
-    // ---------------------------------------- //
-    // --- MULTITHREADING & SYNCHRONIZATION --- //
-    // ---------------------------------------- //
+    // --------------------------------------------------------------------------- //
+    // --- MULTITHREADING & SYNCHRONIZATION RELATED INTERNAL DATA AND FUNCTIONS--- //
+    // ---------------------------------------- ---------------------------------- //
     const int num_threads = 4;
-
     int num_idle_threads;
 
+    enum vertex_state_type {
+        FREE,       // the vertex program for the vertex is not scheduled to any thread.
+        SCHEDULED,  // the vprog is assigned to a thread, which is waiting to acquire lock to begin running
+        RUNNING
+    };
+    std::unordered_map<vertex_id_type, vertex_state_type> vertex_states;
+    
     /**
-     * active_list, cond_no_jobs, running_vertices and deferred_activation_list
+     * active_list, cv_no_jobs, running_vertices and deferred_activation_list
      * are accessed together when
      *  - singaling a vertex
      *  - a vertex program is finished
@@ -99,37 +131,49 @@ private:
      * avoid multiple locking overheads for each one. 
      * 
      * TODO: consider how much separation can be done more extensively.
+     * 
+     * ! See the comments at the very top of the file. Right now this mutex is used for everything.
      */
     std::mutex scheduling_mutex;
 
     /**
      * When a thread tries to get a job, job_queue is empty, and there exists at least one
-     * busy thread, the thread asking for a job waits on cond_no_jobs. It is waken up when 
+     * busy thread, the thread asking for a job waits on cv_no_jobs. It is waken up when 
      * a vertex is signalled. 
      * Alternatively, it may be waken up when the last busy thread finds active_listy empty. 
      * In that case, no futher activation is possible. Each idle thread is waken up and they 
      * all fail to get jobs. After that they all quit. 
      */
-    std::condition_variable cond_no_jobs;
+    std::condition_variable cv_no_jobs;
 
-    /**
-     * A vertex is running if there is a thread currently executing its vertex program.
-     * This set is used in order to ensure that if an running vertex is activated, it
-     * does not get inserted into active_list until its execution is done.
+    /** 
+     * Used in the dining philosophers-based synchronization of vertex programs.
+     * A thread that can not get the exclusive access required for its job (see 
+     * get_exclusive_access below) will wait on cv_exclusive_access[vid] where vid 
+     * is the id of the vertex whose program the thread is scheduled to execute.
      */
-    std::unordered_set<vertex_id_type> running_vertices;
-
-    /**
-     * When an running vertex is signalled, it is placed into deferred_activation_set. When 
-     * the vertex program finishes, it moves the vertex from this set into active_list. This 
-     * ensures that the same vertex is not scheduled to two threads simultaneously.
-     */
-    std::unordered_set<vertex_id_type> deferred_activation_list;
+    std::unordered_map<vertex_id_type, std::condition_variable> cv_exclusive_access;
 
     void thread_start();
     void execute_vprog(vertex_id_type vid);
     bool get_next_job(vertex_id_type& ret_vid);
 
+    /**
+     * Blocks current thread until it has exclusive access to the vertex at vid, all its
+     * neighbours and the edges in between. Equiavalent to pickup(...) in the 
+     * above-mentioned dining philosophers analogy.
+     */
+    void get_exclusive_access(vertex_id_type vid);
+
+    /**
+     * Equiavalent to test(...) in the above-mentioned dining philosophers analogy.
+     */
+    bool exclusive_access_possible(vertex_id_type vid);
+
+    /**
+     * Equiavalent to putdown(...) in the above-mentioned dining philosophers analogy.
+     */
+    void release_exclusive_access(vertex_id_type vid);
 };
 
 /**
@@ -139,21 +183,71 @@ private:
 using namespace std;
 
 template<typename VertexProgram>
+void async_engine<VertexProgram>::get_exclusive_access(vertex_id_type vid) {
+    std::unique_lock<std::mutex> lock(scheduling_mutex);
+
+    while (!exclusive_access_possible(vid)) {
+        cv_exclusive_access[vid].wait(lock);
+    }
+
+    vertex_states[vid] = vertex_state_type::RUNNING;
+}
+
+template<typename VertexProgram>
+bool async_engine<VertexProgram>::exclusive_access_possible(vertex_id_type vid) {
+    // always called by get_exclusive_access, which readily holds mutex_exclusive access
+
+    vertex_type v = g.vertex(vid);
+    for (edge_type *e : v.in_edges) {   // can't get access if any in_neighbour is running
+        if (vertex_states[e->source().id()] == vertex_state_type::RUNNING) {
+            return false;
+        }
+    }
+    for (edge_type *e : v.out_edges) {   // can't get access if any out_neighbour is running
+        if (vertex_states[e->target().id()] == vertex_state_type::RUNNING) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template<typename VertexProgram>
+void async_engine<VertexProgram>::release_exclusive_access(vertex_id_type vid) {
+    std::unique_lock<std::mutex> lock(scheduling_mutex);
+
+    vertex_states[vid] = vertex_state_type::FREE;
+    vertex_type v = g.vertex(vid);
+    for (edge_type *e : v.in_edges) {   // an in_neigbour may possibly start running
+        cv_exclusive_access[e->source().id()].notify_all(); // TODO: notify_one should be enough. think about it.
+    }
+    for (edge_type *e : v.out_edges) {   // an out_neigbour may possibly start running
+        cv_exclusive_access[e->target().id()].notify_all(); // TODO: notify_one should be enough. think about it.
+    }
+
+}
+
+/**
+ * TODO: Might get rid of the need to check if the vertex is SCHEDUELED by 
+ * TODO: moving removal from active_list to after exclusive_access is obtained.
+ * TODO: then, internal_signal would not have to access vertex_states.
+ */
+template<typename VertexProgram>
 void async_engine<VertexProgram>::internal_signal(const vertex_type& vertex) {
-    // lock active list mutex within the whole function body.
+    // lock scheduling_mutex within the whole function body.
     std::unique_lock<std::mutex> lock_AL(scheduling_mutex);
 
     const vertex_id_type vid = vertex.id();
 
-    if (active_list.count(vid) == 0 && deferred_activation_list.count(vid) == 0) {  // if vertex is not already active
-        printf("signaling %d\n", vid);
-        if (running_vertices.count(vid) > 0) { 
-            // if vertex is running, defer activation.
-            deferred_activation_list.insert(vid);
-        } else {
+    if (active_list.count(vid) == 0) {  // if vertex is not already active
+        if (vertex_states[vid] == vertex_state_type::FREE) {
             active_list.insert(vid);
-            cond_no_jobs.notify_one();  // an idle thread may wake up and find a job.
-        } 
+            cv_no_jobs.notify_one();  // an idle thread may wake up and find a job.
+        } else if (vertex_states[vid] == vertex_state_type::SCHEDULED) {
+            // skip activation.. the thread that has the vertex will access the latest data anyway.
+        } else {
+            // TODO: throw a proper exception.
+            cout << "ERROR: running vertex signalled. A neighbour must have been running also" << endl;
+        }
     }
 }
 
@@ -207,24 +301,22 @@ void async_engine<VertexProgram>::start() {
 
 template<typename VertexProgram>
 bool async_engine<VertexProgram>::get_next_job(vertex_id_type& ret_vid) {
-    // lock active list mutex within the whole function body.
+    // lock scheduling_mutex within the whole function body.
     std::unique_lock<std::mutex> lock_AL(scheduling_mutex);
     num_idle_threads++;
     while (active_list.empty() && (num_idle_threads < num_threads)) {
         // wait until some other thread, which may activate new vertices and create jobs, finishes running.
-        printf("going to sleep\n");
-        cond_no_jobs.wait(lock_AL);
+        cv_no_jobs.wait(lock_AL);
     }
     if (active_list.empty()) {   // all other threads are idle, no further activation is possible.
-        cond_no_jobs.notify_all();  // all idle threads should wake up and fail to get a job.
+        cv_no_jobs.notify_all();  // all idle threads should wake up and fail to get a job.
         // num_idle_threads is not decremented so that the other threads can properly fail.
         return false;
     } else {
         ret_vid = *(active_list.begin());
         active_list.erase(ret_vid);
         num_idle_threads--; // the thread is no longer idle
-        running_vertices.insert(ret_vid);   // the vertex starts to run
-        printf("scheduled vertex %d\n", ret_vid);
+        vertex_states[ret_vid] = vertex_state_type::SCHEDULED;
         return true;
     }
 }
@@ -233,21 +325,9 @@ template<typename VertexProgram>
 void async_engine<VertexProgram>::thread_start() {
     vertex_id_type job_vid;
     while (get_next_job(job_vid)) {
+        get_exclusive_access(job_vid);
         execute_vprog(job_vid);
-
-        {// start of mutex-protected block
-            std::unique_lock<std::mutex> lock_AL(scheduling_mutex);
-            // perform deferred activation if necessary.
-            if (deferred_activation_list.count(job_vid) > 0) {  
-                deferred_activation_list.erase(job_vid);
-                active_list.insert(job_vid);
-                cond_no_jobs.notify_one();  // an idle thread may wake up and find a job.
-            }
-
-            running_vertices.erase(job_vid);    // the vertex is no longer running
-            printf("vertex done: %d\n", job_vid);
-        }// end of mutex-protected block
-
+        release_exclusive_access(job_vid);
         // TODO: right after releasing the mutex, get_next_job tries to acquire it again.
         // ?: can this be merged somehow to increase performance?
     }
