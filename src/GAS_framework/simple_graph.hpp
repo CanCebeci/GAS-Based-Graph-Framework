@@ -14,11 +14,11 @@
  *    other vertex information.
  */
 
-#ifndef __NONTEMP_GRAPH_H
-#define __NONTEMP_GRAPH_H
+#ifndef __SIMPLE_GRAPH_H
+#define __SIMPLE_GRAPH_H
 
-#include <list>
-#include <unordered_map>
+#include <list> // adjancecy lists of vertices
+#include <vector> // 
 
 /** 
  * An adjacency list-based graph structure
@@ -26,11 +26,14 @@
 template<typename VertexData, typename EdgeData>
 class Graph {
 public:
-    typedef int vertex_id_type; // should this be statically declared here?
+    // ---------------------------------------- //
+    // ---------------- TYPES ----------------- //
+    // ---------------------------------------- //
+    typedef int vertex_id_type;
 
     typedef VertexData vertex_data_type;    // used by ivertex_program
     typedef EdgeData edge_data_type;    // used by ivertex_program
-
+    
     struct edge_type;
 
     struct vertex_type {
@@ -41,7 +44,7 @@ public:
 
         /**
          * Default constructor required to use vertex_type as the value type in
-         * unordered_map. A default-constructed vertex should never be processed.
+         * std::vector. A default-constructed vertex should never be processed.
          */
         vertex_type(): vid(-1) {}
 
@@ -51,9 +54,9 @@ public:
          */
         vertex_type(vertex_id_type vid, const VertexData& data): vid(vid), vdata(data) {}
 
-        const VertexData& data() const { return vdata; }
-
         VertexData& data() { return vdata; }
+
+        const VertexData& data() const { return vdata; }
 
         int num_in_edges() const {
             return in_edges.size();
@@ -69,7 +72,7 @@ public:
     };
 
     struct edge_type {
-        Graph& graph_ref;
+        Graph& graph_ref;   // needed in order to access the source and target vertices.
 
         vertex_id_type source_vid;
         vertex_id_type target_vid; 
@@ -78,7 +81,6 @@ public:
         /**
          * TODO: the constructor copies the data. What is the better alternative?
          * hold a pointer to vertexdata instead? Is that unnecessary complication?
-         *
          */
         edge_type(Graph& graph_ref, vertex_id_type source, vertex_id_type target, const EdgeData& data)
             : graph_ref(graph_ref), source_vid(source), target_vid(target), edata(data) {}
@@ -96,34 +98,51 @@ public:
         EdgeData& data() { return edata; }
     };
 
-    std::unordered_map<vertex_id_type, vertex_type*> vertices; 
-    
-    Graph() {vertices = std::unordered_map<vertex_id_type, vertex_type *>();}
 
-    // return false if vid already exists
-    bool add_vertex(const vertex_id_type& vid, const VertexData& vdata = VertexData()) {
-        // TODO: VertexData must be default constructable.
-        if (vertices.count(vid) == 0) {
-            vertices[vid] = new vertex_type(vid, vdata);
-            return true;
-        } else {
+    // ---------------------------------------- //
+    // -------------- PROPERTIES -------------- //
+    // ---------------------------------------- //
+
+    std::vector<vertex_type*> vertices;
+
+
+    // ---------------------------------------- //
+    // --------------- METHODS ---------------- //
+    // ---------------------------------------- // 
+
+    /** 
+     * TODO: provide a destructor that de-allocates dynamic memory. 
+     */
+
+    // returns true if vid is negative or occupied 
+    bool add_vertex(vertex_id_type vid, const VertexData& vdata = VertexData()) {
+        if (vid < 0) {
             return false;
         }
+        if (vid >= vertices.size()) {
+            vertices.resize(vid + 1, new vertex_type());    // fill gaps with default constructed 
+                                                            // vertices. They have negative id's.
+        }
+        if (vertices[vid]->id() > 0) {    // the vid is occupied
+            return false;
+        }
+        vertices[vid] = new vertex_type(vid, vdata);
+        return true;
     }
 
-    // returns false if self-edge or vid's don't exist.
+    // returns false if self edge or vid's are invalid.
     bool add_edge(vertex_id_type source, vertex_id_type target,
                   const EdgeData& edata = EdgeData()) {
-        if (source == target || vertices.count(source) == 0 || vertices.count(target) == 0) {
+        if (source == target    // self edge
+            || source < 0 || source >= vertices.size() || vertices[source]->id() < 0     // source invalid
+            || source < 0 || source >= vertices.size() || vertices[source]->id() < 0) {  // target invalid
             return false;
         }
-        // TODO: EdgeData must be default constructable.
 
         edge_type *e = new edge_type(*this, source ,target, edata);
 
         vertices[source]->out_edges.push_back(e);
         vertices[target]->in_edges.push_back(e);
-
         return true;
     }
 
