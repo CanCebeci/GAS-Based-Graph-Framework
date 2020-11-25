@@ -29,7 +29,7 @@
 
 #include "context.hpp"
 #include "../graph/graph_basic_types.hpp"
-#include "../../simple_graph.hpp"  // new graph structure
+#include "../../GAS_framework/simple_graph.hpp"  // new graph structure
 
 #include <iostream>   // added to report errors where needed
 

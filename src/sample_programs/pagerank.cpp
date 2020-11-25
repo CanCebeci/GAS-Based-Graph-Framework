@@ -1,13 +1,17 @@
 #include <iostream>
 #include <cmath>
-#include "simple_graph.hpp"
-#include "async_engine.hpp"
-
-#include "graphlab/graphlab.hpp"
+#include <fstream>
+#include <sstream>
+#include "../GAS_framework/simple_graph.hpp"
+#include "../GAS_framework/async_engine.hpp"
+#include "../graphlab/graphlab.hpp"
 
 using namespace std;
 
 typedef Graph<double, graphlab::empty> graph_type;
+
+const string in_graph_filename = "generated_graph_pagerank.txt";
+const string out_filename = "pagerank_output.txt";
 
 class pagerank_program :
              public graphlab::ivertex_program<graph_type, double> {
@@ -16,7 +20,6 @@ private:
   // a variable local to this program
   double delta;
 public:
-  // no changes to gather_edges and gather
   edge_dir_type gather_edges(icontext_type& context, const vertex_type& vertex) const {
     return graphlab::IN_EDGES;
   }
@@ -24,7 +27,6 @@ public:
                edge_type& edge) const {
     return edge.source().data() / edge.source().num_out_edges();
   }
-  
 
   // Use the total rank of adjacent pages to update this page 
   void apply(icontext_type& context, vertex_type& vertex,
@@ -35,7 +37,6 @@ public:
     delta = newval - prevval;
   }
   
-  // The scatter edges depend on whether the pagerank has converged 
   edge_dir_type scatter_edges(icontext_type& context, const vertex_type& vertex) const {
     return graphlab::OUT_EDGES;
   }
@@ -51,20 +52,50 @@ public:
 
 int main() { 
     graph_type g;
-    g.add_vertex(1, 1.0);
-    g.add_vertex(2, 1.0);
-    g.add_vertex(3, 1.0);
 
-    g.add_edge(1, 2);
-    g.add_edge(1, 3);
-    g.add_edge(2, 3);
-    g.add_edge(3, 2);
+    /**
+     *  ---- Parse the input file ----
+     * The parsing method used here is very specific. It only works with input
+     * files that have the format used in the test I've run.
+     */
+    string line;
+    ifstream input_graph(in_graph_filename);
+    if (!input_graph.is_open()) {
+      cout << "Can not open input file" << endl;
+      return -1;
+    }
+    int line_no = 0;
+    while (getline(input_graph, line)) {
+      stringstream ss(line);
+      int cur_vid;
+      int neigh_vid;
+      ss >> cur_vid;
+      g.add_vertex(cur_vid, 1.0);
+      while (ss >> neigh_vid) {
+        if (line_no < neigh_vid) {
+          // need to add neighbour here so that add_edge does not fail.
+          g.add_vertex(neigh_vid, 1.0);
+        }
+        g.add_edge(cur_vid, neigh_vid);
+      }
+      line_no++;
+    }
+    input_graph.close();
 
+    // --- execute program
     async_engine<pagerank_program> engine(g, true); // the second argument enables gather caching.
     engine.signal_all();
     engine.start();
 
-    for (int i = 1; i <= 3; i++) {
-      cout << "pagerank of vertex " << i << ": " << g.vertex(i).data() << endl;  
+    // --- write the output file
+    ofstream out_file(out_filename);
+    if (!out_file.is_open()) {
+        cout << "Unable to open output file" << endl;
+        return -1;
     }
+
+    for (int i = 0; i < g.num_vertices(); i++) {
+        out_file << i << "\t" << g.vertex(i).data() << endl;
+    }
+    out_file.close();
 }

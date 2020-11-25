@@ -6,8 +6,8 @@
  * In the near future, it may be replaced with the Chandy-Misra solution, 
  * which is used by GraphLab as well.
  * 
- * ! For simplicity's sake, everything that needs synchronization uses the
- * ! same mutex. They all access vertex_states so that is to some degreee 
+ * ! For the sake of simplicity, everything that needs synchronization uses
+ * ! the same mutex. They all access vertex_states so that is to some degreee 
  * ! necessary. Think about how this might be resolved. Using a lock for
  * ! each element in vertex_states might allow deadlocks. 
  * 
@@ -19,8 +19,8 @@
 #define __ASYNC_ENGINE_H
 
 #include "simple_graph.hpp"
-#include "graphlab/vertex_program/ivertex_program.hpp"
-#include "graphlab/vertex_program/context.hpp"
+#include "../graphlab/vertex_program/ivertex_program.hpp"
+#include "../graphlab/vertex_program/context.hpp"
 
 #include <unordered_set>
 #include <unordered_map>
@@ -63,10 +63,12 @@ public:
         if (!std::is_base_of<graphlab::ivertex_program<graph_type, gather_type>, VertexProgram>::value) {
             throw "type parameter for async egnine is not derived from graphlab::ivertex_program";
         }
+        vertex_states.resize(g.num_vertices(), vertex_state_type::FREE);
+        gather_cache.resize(g.num_vertices());
+        has_cache.resize(g.num_vertices(), false);
 
-        for (const auto& t : g.vertices) {
-            vertex_states[t.first] = vertex_state_type::FREE;
-        }
+        // This cannot be resized since the copy constructor for std::condition_variable is deleted.
+        cv_exclusive_access = std::vector<std::condition_variable>(g.num_vertices());
     }
 
     // called by the application programmer
@@ -88,28 +90,25 @@ private:
 
     /**  
      * TODO: Possibly replace later with better data structure.
-     * * A bitset could be useful if vid's were consecutive.
+     * * A bitset could be useful now that vid's are restricted to be consecutive.
+     * * Though it would make an empty-check and the retrival of any acitve vertex slower.
      */
     std::unordered_set<vertex_id_type> active_list; // The collection of vertices that have not converged yet.
 
+    /**
+     * Indicates whether the application programmer has enabled gather caching.
+     */
     bool caching_enabled;
 
-    /**
-     * GraphLab uses vectors instead of maps for gather_cache and has_cache,
-     * which also enables the use of the special vector<graphlab::empty>
-     * However, this implementation does not use local vertex id's and the global
-     * vertex id's are not necessarily consecutive. Thus, a map is used instead.
-     * TODO: change this? (could result in faster retrieval)
-     */
-    std::unordered_map<vertex_id_type, gather_type> gather_cache;  
-    std::unordered_map<vertex_id_type, bool> has_cache; // IMPORTANT: are bools default initialized to false?
+    std::vector<gather_type> gather_cache;  
+    std::vector<bool> has_cache;
 
-    // creating a separate context for each veertex program is not necessary. This one is used by all of them.
+    // creating a separate context for each vertex program is not necessary. This one is used by all of them.
     context_type context;
 
     // --------------------------------------------------------------------------- //
-    // --- MULTITHREADING & SYNCHRONIZATION RELATED INTERNAL DATA AND FUNCTIONS--- //
-    // ---------------------------------------- ---------------------------------- //
+    // --- MULTITHREADING & SYNCHRONIZATION RELATED INTERNAL DATA & FUNCTIONS ---- //
+    // --------------------------------------------------------------------------- //
     const int num_threads = 4;
     int num_idle_threads;
 
@@ -118,21 +117,10 @@ private:
         SCHEDULED,  // the vprog is assigned to a thread, which is waiting to acquire lock to begin running
         RUNNING
     };
-    std::unordered_map<vertex_id_type, vertex_state_type> vertex_states;
+    std::vector<vertex_state_type> vertex_states;
     
     /**
-     * active_list, cv_no_jobs, running_vertices and deferred_activation_list
-     * are accessed together when
-     *  - singaling a vertex
-     *  - a vertex program is finished
-     *  - a thread needs a new job
-     * 
-     * scheduling_mutex regulates access to all four data members as a group to
-     * avoid multiple locking overheads for each one. 
-     * 
-     * TODO: consider how much separation can be done more extensively.
-     * 
-     * ! See the comments at the very top of the file. Right now this mutex is used for everything.
+     * ! See the comments at the very top of the file. Right now this mutex is used for all synchronization.
      */
     std::mutex scheduling_mutex;
 
@@ -140,7 +128,7 @@ private:
      * When a thread tries to get a job, job_queue is empty, and there exists at least one
      * busy thread, the thread asking for a job waits on cv_no_jobs. It is waken up when 
      * a vertex is signalled. 
-     * Alternatively, it may be waken up when the last busy thread finds active_listy empty. 
+     * Alternatively, it may be waken up when the last busy thread finds active_list empty. 
      * In that case, no futher activation is possible. Each idle thread is waken up and they 
      * all fail to get jobs. After that they all quit. 
      */
@@ -152,7 +140,7 @@ private:
      * get_exclusive_access below) will wait on cv_exclusive_access[vid] where vid 
      * is the id of the vertex whose program the thread is scheduled to execute.
      */
-    std::unordered_map<vertex_id_type, std::condition_variable> cv_exclusive_access;
+    std::vector<std::condition_variable> cv_exclusive_access;
 
     void thread_start();
     void execute_vprog(vertex_id_type vid);
@@ -274,10 +262,9 @@ internal_clear_gather_cache(const vertex_type& vertex) {
  */
 template<typename VertexProgram>
 void async_engine<VertexProgram>::signal_all() {
-    for (typename unordered_map<vertex_id_type, vertex_type*>::iterator iter = g.vertices.begin(); 
-                                                                iter != g.vertices.end(); iter++) {
-        if (active_list.count(iter->first) == 0) {
-            active_list.insert(iter->first);
+    for (int i = 0; i < g.vertices.size(); i++) {
+        if (active_list.count(i) == 0) {
+            active_list.insert(i);
         }
     }
 }
