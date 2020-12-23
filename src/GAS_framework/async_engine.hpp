@@ -21,9 +21,9 @@
 #include "simple_graph.hpp"
 #include "../graphlab/vertex_program/ivertex_program.hpp"
 #include "../graphlab/vertex_program/context.hpp"
+#include "spm_interface.hpp"
 
 #include <unordered_set>
-#include <unordered_map>
 #include <vector>
 #include <type_traits>  //for is_base_of
 #include <iostream>
