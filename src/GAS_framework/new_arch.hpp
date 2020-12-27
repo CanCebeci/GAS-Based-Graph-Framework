@@ -8,7 +8,7 @@ namespace new_arch {
     typedef intptr_t spm_addr_type;
     typedef intptr_t word;
 
-    const size_t SPM_SIZE = 32 * 1024;    // in bytes
+    const size_t SPM_SIZE = 256;    // in bytes
 
     // --- placeholder functions for special instructions ---
     // ! currently, these functions are not placeholders but implement access to an
@@ -17,10 +17,10 @@ namespace new_arch {
     // NBL2SPM and SPM2MEM work for sizes divisible by or less than 8 (word size)
 
     // a word is 8 bytes (intptr_t)
-    word *SPM = new word[SPM_SIZE / sizeof(unsigned int)];
+    word *SPM = new word[SPM_SIZE / sizeof(word)];
     
     // Non-blocking load to SPM
-    void NBL2SPM(void *mm_addr, spm_addr_type spm_addr, size_t size) {
+    void NBL2SPM(const void *mm_addr, spm_addr_type spm_addr, size_t size) {
         if (spm_addr % 8 > 0 || (size % 8 > 0 && size > 8)) {
             // not iplemented yet for simplicity
             throw std::runtime_error("NBL2SPM not word-aligned");
@@ -31,7 +31,7 @@ namespace new_arch {
     }
 
     // Non-blocking store from SPM
-    void SPM2MEM(void *mm_addr, spm_addr_type spm_addr, size_t size) {
+    void SPM2MEM(const void *mm_addr, spm_addr_type spm_addr, size_t size) {
         if (spm_addr % 8 > 0 || (size % 8 > 0 && size > 8)) {
             // not iplemented yet for simplicity
             throw std::runtime_error("SPM2MEM not word-aligned");
@@ -44,6 +44,8 @@ namespace new_arch {
 
     // Synchronous load to a register from SPM
     word SPM2REG(spm_addr_type spm_addr) {
+        std::cerr << spm_addr << std::endl;
+        // THIS ONE cAUSES SEGFALUT
         if (spm_addr % 8 > 0) {
             // not iplemented yet for simplicity
             throw std::runtime_error("SPM2REG not word-aligned");
@@ -53,6 +55,9 @@ namespace new_arch {
 
     // Synchronous store to a SPM from a register
     void REG2SPM(spm_addr_type spm_addr, word value) {
+        if (spm_addr == 1264) {
+            std::cerr << "Write to 1264: " << value << std::endl; 
+        }
         if (spm_addr % 8 > 0) {
             // not iplemented yet for simplicity
             throw std::runtime_error("REG2SPM not word-aligned");

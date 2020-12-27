@@ -5,9 +5,9 @@
 #include <ctime>
 using namespace std;
 
-const int max_nodes = 100;
-const int min_nodes = 70;
-const double max_neighs_proportion = 0.3;
+const int max_nodes = 200;
+const int min_nodes = 199;
+const double max_neighs_proportion = 0.4;
 const int max_weight = 50;
 
 int main() {
@@ -17,10 +17,13 @@ int main() {
         return -1;
     }
 
+
     srand(time(NULL));    // seed rand()
     const int num_nodes = min_nodes + (rand() % (max_nodes - min_nodes));
     cout << "num nodes: " << num_nodes << endl;
     const int max_neighs = max_nodes * max_neighs_proportion;
+
+    long int num_edges = 0;
 
     for (int i = 0; i < num_nodes; i++) {
         graph_file << i;
@@ -36,8 +39,10 @@ int main() {
             neighs.insert(roll);
             int weight = (rand() % max_weight) + 1;
             graph_file << " " << roll << " " << weight;
+            num_edges++;
         }
         graph_file << endl;
     }
+    cout << "num edges: " << num_edges << endl;
     graph_file.close();
 }

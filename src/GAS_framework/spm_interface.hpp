@@ -10,8 +10,6 @@
  * 
  * * Implement dirty-checks when removing data instead of writing
  * back to the main memory all the time.
- * 
- * ! Consider race conditions and synchronization issues.
  */
 
 #ifndef __SPM_INTERFACE_H
@@ -34,13 +32,17 @@ using namespace new_arch;
 #define VSLAB_START         (4 * SPM_POINTER_SZ)
 #define SPM_NULL            spm_addr_type(0)    // 0 is reserved, can be considered as null
 
+int num_esq = 0; // test 
+
 template<typename GraphType>
 class spm_interface {
 
     typedef typename GraphType::vertex_id_type vertex_id_type;
     typedef typename GraphType::vertex_type vertex_type;
+    typedef typename GraphType::edge_type edge_type;
     typedef typename GraphType::vertex_data_type vertex_data_type;
     typedef typename GraphType::edge_data_type edge_data_type;
+
 
     // ! turn these into macros so that additional memory access is not necessary.
     const new_arch::size_t v_slot_size = sizeof(vertex_data_type) + sizeof(vertex_data_type *);  
@@ -82,27 +84,31 @@ public:
 
     /**
      * Brings vertex data from the main memory to SPM.
-     * 
      * Returns false is SPM is full and data can not be loaded.
-     * ! should not be called for vdata already in SPM.
-     * TODO: implement a check for the line above
-     * ? Might not be an issue since neighboring vertices never execute together.
+     * Returns false if vdata is already in SPM. Normally, load_vdata
+     * is not called in such a case since neighboring vertices will not
+     * execute simultaneously. May only happen when two vertices are
+     * doubly-linked and one has too few neigbors (so that vdata is loaded
+     * both as an in_neigh and out_neigh).
      */
-    bool load_vdata(vertex_type &v) {
+    bool load_vdata(const vertex_type &v) {
+        if (find_vdata(v) != SPM_NULL) {
+            std::cerr << "DUPE" << v.id() << std::endl;
+            return false;
+        }
         // ensure exclusive access to VEMPTY_HEAD and VSLAB_END
         std::unique_lock<std::mutex> lock(vslab_mutex);
-
         // if there is an empty slot in the vertex slab, store there
         spm_addr_type head = (spm_addr_type) SPM2REG(ADDR_VEMPTY_HEAD);
         if (head != SPM_NULL) {
             // advance VEMPTY_HEAD
-            spm_addr_type tail = SPM2REG(head);
+            spm_addr_type tail = SPM2REG(head + sizeof(vertex_data_type *));
             REG2SPM(ADDR_VEMPTY_HEAD, tail);
 
             internal_load_vdata(v, head);
-
             return true;
         }
+
         // if extending the vertex slab will not cause collision with the edge slab
         spm_addr_type end = (spm_addr_type) SPM2REG(ADDR_VSLAB_END);
             // uppermost edge slab entry begins at ESLAB_END + e_slot_size
@@ -116,28 +122,59 @@ public:
 
         // if there are empty slots in the edge slab, compress it.
         {   // local scope for the locks
-        
+
             std::unique_lock<std::mutex> lock2(eslab_mutex);
             std::unique_lock<std::mutex> lock3(eslot_reloc_mutex);
+
             spm_addr_type edge_head = (spm_addr_type) SPM2REG(ADDR_EEMPTY_HEAD);
             if (edge_head != SPM_NULL) {
-                // advance edge head
-                spm_addr_type edge_tail = SPM2REG(edge_head);
-                REG2SPM(ADDR_EEMPTY_HEAD, edge_tail);
-
-                // move last edge slot to edge empty head
+                num_esq++;
+                std::cerr << "num_esq: " << num_esq << std::endl;
                 spm_addr_type edge_end = SPM2REG(ADDR_ESLAB_END);
                 word end_mm_addr = SPM2REG(edge_end + e_slot_size);
-                word end_data = SPM2REG(edge_end + e_slot_size + sizeof(edge_data_type *));
-                REG2SPM(edge_head, end_mm_addr);
-                REG2SPM(edge_head + sizeof(edge_data_type *), end_data);
 
+                if (end_mm_addr == SPM_NULL) {  // if the last slot is an empty slot
+                    std::cerr << "in ----- 1" << std::endl;
+                    // scan linked list until the parent of the last slot is found
+                    // TODO: if two SPM pointers fit into a slot, use a doubly linked list to avoid linear scan
+                    spm_addr_type cur = SPM2REG(ADDR_EEMPTY_HEAD);
+                    if (cur == edge_end + e_slot_size) {  // last slot is head
+                        std::cerr << "in ----- 1,1" << std::endl;
+                        REG2SPM(ADDR_EEMPTY_HEAD, SPM_NULL);
+                    } else {
+                        std::cerr << "in ----- 1,2" << std::endl;
+                        std::cerr << "edge_end + e_slot_size" << edge_end + e_slot_size << std::endl;
+                        //cur = SPM2REG(cur + sizeof(edge_data_type *));  // advance cur
+                        std::cerr << "in ----- 1,2" << std::endl;
+                        while (cur != SPM_NULL &&  SPM2REG(cur + sizeof(edge_data_type *)) != edge_end + e_slot_size) {
+                            std::cerr << "loop" << std::endl;
+                            cur = SPM2REG(cur + sizeof(edge_data_type *));
+                        }
+                        if (cur != SPM_NULL) {  // cur is the parent of the last node
+                            std::cerr << "in ----- 1,2,1" << std::endl;
+                            spm_addr_type grandchild = SPM2REG(edge_end + e_slot_size + sizeof(edge_data_type *));
+                            REG2SPM(cur + sizeof(edge_data_type *), grandchild); // make cur point to grandchild
+                        }
+                    }
+                } else {
+                    std::cerr << "in ----- 2" << std::endl;
+                    // advance edge head
+                    spm_addr_type edge_tail = SPM2REG(edge_head + sizeof(edge_data_type *));
+                    REG2SPM(ADDR_EEMPTY_HEAD, edge_tail);
+
+                    // move last edge slot to edge empty head
+                    word end_data = SPM2REG(edge_end + e_slot_size + sizeof(edge_data_type *));
+                    REG2SPM(edge_head, end_mm_addr);
+                    REG2SPM(edge_head + sizeof(edge_data_type *), end_data);
+                }
                 // shrink edge slab
                 REG2SPM(ADDR_ESLAB_END, edge_end + e_slot_size);
-                
+
                 // load to the end of v_slab
                 REG2SPM(ADDR_VSLAB_END, end + v_slot_size);
+ 
                 internal_load_vdata(v, end);    
+
                 return true;
             }
         }
@@ -150,7 +187,7 @@ public:
      * 
      * Returns false if vertex data is not in SPM.
      */
-    bool remove_vdata(vertex_type &v) {
+    bool remove_vdata(const vertex_type &v) {
         // ensure exclusive access to VEMPTY_HEAD and VSLAB_END
         std::unique_lock<std::mutex> lock(vslab_mutex);
 
@@ -168,36 +205,41 @@ public:
         } else {
             // add the freed slot to the empty list
             spm_addr_type head = SPM2REG(ADDR_VEMPTY_HEAD);
-            REG2SPM(rm_addr, head); // link head no freed slot
+            REG2SPM(rm_addr, SPM_NULL); // put empty marker into freed slot
+            REG2SPM(rm_addr + sizeof(vertex_data_type *), head); // link head to freed slot
             REG2SPM(ADDR_VEMPTY_HEAD, rm_addr); // change head pointer to freed slot
         }
     }
 
     /**
-     * For vdata that fits into a word.
-     * Reads the value from SPM, throws runtime error is vdata not in SPM.
+     * For vdata that fits into a word. Reads the value from SPM.
+     * Returns false if vdata not present in SPM
+     * The data read is returned in argument ret_data.
      */
-    vertex_data_type read_vdata(vertex_type &v) {
+    bool read_vdata(const vertex_type &v, vertex_data_type &ret_data) {
         std::unique_lock<std::mutex> lock(vslot_reloc_mutex);
         spm_addr_type addr = find_vdata(v);
         if (addr == SPM_NULL) {
-            throw std::runtime_error("tried to read vertex data not in SPM");
+            return false;
         } else {
-            return vertex_data_type(SPM2REG(addr + sizeof(vertex_data_type *)));
+            ret_data = vertex_data_type(SPM2REG(addr + sizeof(vertex_data_type *)));
+            return true;
         }
     }
 
     /**
-     * For vdata that fits into a word.
-     * Writes the value to SPM, throws runtime error is vdata not in SPM.
+     * For vdata that fits into a word. Writes the value to SPM.
+     * Returns false if vdata not present in SPM
+     * The data read is returned in argument ret_data..
      */
-    void write_vdata(vertex_type &v, const vertex_data_type &w_data) {
+    bool write_vdata(const vertex_type &v, const vertex_data_type &w_data) {
         std::unique_lock<std::mutex> lock(vslot_reloc_mutex);
         spm_addr_type addr = find_vdata(v);
         if (addr == SPM_NULL) {
-            throw std::runtime_error("tried to write vertex data not in SPM");
+            return false;
         } else {
             REG2SPM(addr + sizeof(vertex_data_type *), word(w_data));
+            return true;
         }
     }
 
@@ -212,53 +254,81 @@ public:
      * ! should not be called for edata already in SPM.
      * TODO: implement a check for the line above
      */
-    bool load_edata(edge_type &e) {
+    bool load_edata(const edge_type &e) {
         // ensure exclusive access to EEMPTY_HEAD and ESLAB_END
         std::unique_lock<std::mutex> lock(eslab_mutex);
 
         // if there is an empty slot in the edge slab, store there
+        std::cerr << "flagg e1"<< std::endl;
         spm_addr_type head = (spm_addr_type) SPM2REG(ADDR_EEMPTY_HEAD);
+        std::cerr << "edge head: "<< head << std::endl;
         if (head != SPM_NULL) {
             // advance EEMPTY_HEAD
-            spm_addr_type tail = SPM2REG(head);
+            std::cerr << "flagg e2"<< std::endl;
+            spm_addr_type tail = SPM2REG(head + sizeof(edge_data_type *));
+            std::cerr << "flagg e3"<< std::endl;
             REG2SPM(ADDR_EEMPTY_HEAD, tail);
 
             internal_load_edata(e, head);
             return true;
         }
         // if extending the edge slab will not cause collision with the vertex slab
+        std::cerr << "flagg e4"<< std::endl;
         spm_addr_type end = (spm_addr_type) SPM2REG(ADDR_ESLAB_END);
+        std::cerr << "flagg e5"<< std::endl;
         if (end - e_slot_size >= SPM2REG(ADDR_VSLAB_END)) {
+            std::cerr << "flagg e6"<< std::endl;
             // extend edge slab
-            REG2SPM(ADDR_VSLAB_END, end - e_slot_size);
+            REG2SPM(ADDR_ESLAB_END, end - e_slot_size);
             internal_load_edata(e, end);
             return true;
         }
-
+        std::cerr << "flagg e7"<< std::endl;
         // if there are empty slots in the vertex slab, compress it.
         {   // local scope for the lock on vslab_mutex
         
             std::unique_lock<std::mutex> lock2(vslab_mutex);
             std::unique_lock<std::mutex> lock3(vslot_reloc_mutex);
             spm_addr_type vertex_head = (spm_addr_type) SPM2REG(ADDR_VEMPTY_HEAD);
+            std::cerr << "flagg e8"<< std::endl;
             if (vertex_head != SPM_NULL) {
-                // advance vertex head
-                spm_addr_type vertex_tail = SPM2REG(vertex_head);
-                REG2SPM(ADDR_VEMPTY_HEAD, vertex_tail);
-
-                // move last vertex slot to vertex empty head
                 spm_addr_type vertex_end = SPM2REG(ADDR_VSLAB_END);
-                word end_mm_addr = SPM2REG(vertex_end);
-                word end_data = SPM2REG(vertex_end + sizeof(vertex_data_type *));
-                REG2SPM(vertex_head, end_mm_addr);
-                REG2SPM(vertex_head + sizeof(edge_data_type *), end_data);
+                std::cerr << "flagg e9"<< std::endl;
+                word end_mm_addr = SPM2REG(vertex_end - v_slot_size);
+                std::cerr << "flagg e10"<< std::endl;
+                if (end_mm_addr == SPM_NULL) {  // if the last slot is an empty slot
+                    // scan linked list until the parent of the last slot is found
+                    // TODO: if two SPM pointers fit into a slot, use a doubly linked list to avoid linear scan
+                    spm_addr_type cur = SPM2REG(ADDR_VEMPTY_HEAD);
+                    if (cur == vertex_end - v_slot_size) {  // last slot is head
+                        REG2SPM(ADDR_VEMPTY_HEAD, SPM_NULL);
+                    } else {
+                        //cur = SPM2REG(cur + sizeof(vertex_data_type *));  // advance cur
+                        while (cur != SPM_NULL &&  SPM2REG(cur + sizeof(vertex_data_type *)) != vertex_end - v_slot_size) {
+                            cur = SPM2REG(cur + sizeof(vertex_data_type *));
+                        }
+                        if (cur != SPM_NULL) {  // cur is the parent of the last node
+                            spm_addr_type grandchild = SPM2REG(vertex_end - v_slot_size + sizeof(vertex_data_type *));
+                            REG2SPM(cur + sizeof(vertex_data_type *), grandchild); // make cur point to grandchild
+                        }
+                    }
+                } else {
+                    // advance vertex head
+                    spm_addr_type vertex_tail = SPM2REG(vertex_head + sizeof(vertex_data_type *));
+                    REG2SPM(ADDR_VEMPTY_HEAD, vertex_tail);
 
+                    // move last vertex slot to vertex empty head
+                    word end_data = SPM2REG(vertex_end - v_slot_size + sizeof(edge_data_type *));
+                    REG2SPM(vertex_head, end_mm_addr);
+                    REG2SPM(vertex_head + sizeof(edge_data_type *), end_data);
+                }
                 // shrink vertex slab
                 REG2SPM(ADDR_VSLAB_END, vertex_end - v_slot_size);
-                
+
                 // load to the end of e_slab
                 REG2SPM(ADDR_ESLAB_END, end - e_slot_size);
-                internal_load_vdata(e, end);    
+                internal_load_edata(e, end);    
+
                 return true;
             }
         }
@@ -272,7 +342,7 @@ public:
      * 
      * Returns false if edge data is not in SPM.
      */
-    bool remove_edata(edge_type &e) {
+    bool remove_edata(const edge_type &e) {
         // ensure exclusive access to EEMPTY_HEAD and ESLAB_END
         std::unique_lock<std::mutex> lock(eslab_mutex);
 
@@ -290,36 +360,41 @@ public:
         } else {
             // add the freed slot to the empty list
             spm_addr_type head = SPM2REG(ADDR_EEMPTY_HEAD);
-            REG2SPM(rm_addr, head); // link head to freed slot
+            REG2SPM(rm_addr, SPM_NULL); // put empty marker into freed slot
+            REG2SPM(rm_addr + sizeof(edge_data_type *), head); // link head to freed slot
             REG2SPM(ADDR_EEMPTY_HEAD, rm_addr); // change head pointer to freed slot
         }
     }
 
     /**
-     * For edata that fits into a word.
-     * Reads the value from SPM, throws runtime error is vdata not in SPM.
+     * For edata that fits into a word. Reads the value from SPM.
+     * Returns false if edata not present in SPM
+     * The data read is returned in argument ret_data.
      */
-    vertex_data_type read_edata(edge_type &v) {
+    bool read_edata(const edge_type &e, edge_data_type &ret_data) {
         std::unique_lock<std::mutex> lock(eslot_reloc_mutex);
-        spm_addr_type addr = find_edata(v);
+        spm_addr_type addr = find_edata(e);
         if (addr == SPM_NULL) {
-            throw std::runtime_error("tried to read edge data not in SPM");
+            return false;
         } else {
-            return edge_data_type(SPM2REG(addr + sizeof(edge_data_type *)));
+            ret_data = edge_data_type(SPM2REG(addr + sizeof(edge_data_type *)));
+            return true;
         }
     }
 
     /**
-     * For edata that fits into a word.
-     * Writes the value to SPM, throws runtime error is vdata not in SPM.
+     * For edata that fits into a word. Writes the value to SPM.
+     * Returns false if edata not present in SPM
+     * The data read is returned in argument ret_data..
      */
-    void write_edata(edge_type &v, const edge_data_type &w_data) {
+    bool write_edata(const edge_type &e, const edge_data_type &w_data) {
         std::unique_lock<std::mutex> lock(eslot_reloc_mutex);
-        spm_addr_type addr = find_edata(v);
+        spm_addr_type addr = find_edata(e);
         if (addr == SPM_NULL) {
-            throw std::runtime_error("tried to write edge data not in SPM");
+            return false;
         } else {
             REG2SPM(addr + sizeof(edge_data_type *), word(w_data));
+            return true;
         }
     }
 
@@ -329,11 +404,11 @@ private:
      * and locates the slot which contains the data of argument vertex.
      * Returns SPM_NULL if vdata is not in SPM.
      */
-    spm_addr_type find_vdata(vertex_type &v) {
+    spm_addr_type find_vdata(const vertex_type &v) {
         spm_addr_type cur = VSLAB_START;
         spm_addr_type end = SPM2REG(ADDR_VSLAB_END);
         while (cur < end) {
-            if (SPM2REG(cur) == (word) &(v.data())) {
+            if (SPM2REG(cur) != SPM_NULL && SPM2REG(cur) == (word) &(v.data())) {
                 return cur;
             }
             cur += v_slot_size;
@@ -345,7 +420,8 @@ private:
      * Helper function used by load_vdata once the spm_addr for the load
      * is determined.
      */
-    void internal_load_vdata(vertex_type &v, spm_addr_type addr) {
+    void internal_load_vdata(const vertex_type &v, spm_addr_type addr) {
+        std::cerr << "internal vdata load: "<< addr << std::endl;
         REG2SPM(addr, (word) &(v.data())); // store mm_address to SPM
         NBL2SPM(&(v.data()), addr + sizeof(vertex_data_type *), sizeof(vertex_data_type)); // load vdata to SPM
     }
@@ -355,11 +431,11 @@ private:
      * and locates the slot which contains the data of argument edge.
      * Returns SPM_NULL if edata is not in SPM.
      */
-    spm_addr_type find_edata(edge_type &e) {
+    spm_addr_type find_edata(const edge_type &e) {
         spm_addr_type cur = SPM_SIZE - e_slot_size;
         spm_addr_type end = SPM2REG(ADDR_ESLAB_END);
         while (cur > end) {
-            if (SPM2REG(cur) == (word) &(e.data())) {
+            if (SPM2REG(cur) != SPM_NULL && SPM2REG(cur) == (word) &(e.data())) {
                 return cur;
             }
             cur -= e_slot_size;
@@ -370,7 +446,7 @@ private:
      * Helper function used by load_edata once the spm_addr for the load
      * is determined.
      */
-    void internal_load_edata(edge_type &v, spm_addr_type addr) {
+    void internal_load_edata(const edge_type &e, spm_addr_type addr) {
         REG2SPM(addr, (word) &(e.data())); // store mm_address to SPM
         NBL2SPM(&(e.data()), addr + sizeof(edge_data_type *), sizeof(edge_data_type)); // load edata to SPM
     }
