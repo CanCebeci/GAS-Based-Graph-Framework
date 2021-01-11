@@ -5,10 +5,10 @@
 #include <ctime>
 using namespace std;
 
-const int max_nodes = 200;
-const int min_nodes = 199;
-const double max_neighs_proportion = 0.4;
-const int max_weight = 50;
+const int max_nodes = 8001;
+const int min_nodes = 8000;
+const double max_neighs_proportion = 0.02;
+const int max_weight = 100;
 
 int main() {
     ofstream graph_file("generated_graph_SSSP.txt");
@@ -37,7 +37,7 @@ int main() {
                 roll = rand() % num_nodes;
             }
             neighs.insert(roll);
-            int weight = (rand() % max_weight) + 1;
+            int weight = (rand() % max_weight) + 2;
             graph_file << " " << roll << " " << weight;
             num_edges++;
         }

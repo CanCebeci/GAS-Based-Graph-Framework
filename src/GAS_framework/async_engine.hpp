@@ -98,6 +98,8 @@ public:
     long int spm_hits;
     long int spm_misses;
 
+    spm_interface<graph_type> spmi;
+
 private:
     graph_type& g;  // A reference to the input graph.
 
@@ -119,7 +121,7 @@ private:
     // creating a separate context for each vertex program is not necessary. This one is used by all of them.
     context_type context;
 
-    spm_interface<graph_type> spmi;
+
 
     // --------------------------------------------------------------------------- //
     // --- MULTITHREADING & SYNCHRONIZATION RELATED INTERNAL DATA & FUNCTIONS ---- //
@@ -204,7 +206,6 @@ void async_engine<VertexProgram>::get_exclusive_access(vertex_id_type vid) {
 
     vertex_id_type block;
     while (!exclusive_access_possible(vid, block)) {
-        cerr << "WAITIN'\n";
         cv_exclusive_access[block].wait(lock);
     }
 
@@ -224,7 +225,7 @@ void async_engine<VertexProgram>::get_exclusive_access(vertex_id_type vid) {
 template<typename VertexProgram>
 bool async_engine<VertexProgram>::exclusive_access_possible(vertex_id_type vid, vertex_id_type &block) {
     // always called by get_exclusive_access, which readily holds mutex_exclusive access
-
+    
     vertex_type v = g.vertex(vid);
     if (in_use[v.id()]) {
         block = v.id();
@@ -286,7 +287,7 @@ void async_engine<VertexProgram>::internal_signal(const vertex_type& vertex) {
             // skip activation.. the thread that has the vertex will access the latest data anyway.
         } else {
             // TODO: throw a proper exception.
-            cerr << "ERROR: running vertex signalled. A neighbour must have been running also" << endl;
+            throw std::runtime_error("running vertex signalled. A neighbour must have been running also");
         }
     }
 }
@@ -365,7 +366,7 @@ void async_engine<VertexProgram>::thread_start() {
     vertex_id_type job_vid;
     while (get_next_job(job_vid)) {
         get_exclusive_access(job_vid);
-        cerr << "getexclac done v: " << job_vid << endl;
+        //cerr << "getexclac done v: " << job_vid << endl;
         // --- vertex-program-level load ahead ---
         vertex_type& job_vertex = g.vertex(job_vid);
         for (int i = 0; i < min(load_ahead_distance, job_vertex.num_in_edges()); i++) {
@@ -380,7 +381,6 @@ void async_engine<VertexProgram>::thread_start() {
              i < min(load_ahead_distance - job_vertex.num_in_edges(),
                      job_vertex.num_out_edges());
                      i++) {
-
             if (!is_same<edge_data_type, graphlab::empty>::value) {
                 spmi.load_edata(*job_vertex.out_edges[i]);
             }
@@ -388,14 +388,18 @@ void async_engine<VertexProgram>::thread_start() {
                 spmi.load_vdata((job_vertex.out_edges[i])->target());
             }
         }
-        cerr << "vprog preload done v: " << job_vid << endl;
+        //cerr << "vprog preload done v: " << job_vid << endl;
         // vertex-program-level load ahead done
         // *** use the BARRIER INSTRUCTION here to suspend thread until vprog-level load ahead is done *** //
         execute_vprog(job_vid);
-        cerr << "excv done v: " << job_vid << endl;
+        //cerr << "excv done v: " << job_vid << endl;
         release_exclusive_access(job_vid);
         // TODO: right after releasing the mutex, get_next_job tries to acquire it again.
         // ?: can this be merged somehow to increase performance?
+        //spmi.print_vslab_info();
+        //spmi.print_eslab_info();
+        //string in;
+        //std::cin >> in;
     }
 }
 
@@ -405,20 +409,20 @@ void async_engine<VertexProgram>::check_spm_hit(const edge_type &e, const vertex
         edge_data_type edata;
         if (spmi.read_edata(e, edata)) {
             spm_hits++;
-            cerr << "-> edge hit, ";
+            //cerr << "-> edge hit, ";
         } else {
             spm_misses++;
-            cerr << "-> edge miss, ";
+            //cerr << "-> edge miss, ";
         }
     }
     if (!is_same<vertex_data_type, graphlab::empty>::value) {
         vertex_data_type vdata;
         if (spmi.read_vdata(v, vdata)) {
             spm_hits++;
-            cerr << "vertex hit\n";
+            //cerr << "vertex hit\n";
         } else {
             spm_misses++;
-            cerr << "vertex miss\n";
+            //cerr << "vertex miss\n";
         }
     }
 }
@@ -426,6 +430,7 @@ void async_engine<VertexProgram>::check_spm_hit(const edge_type &e, const vertex
 
 template<typename VertexProgram>
 void async_engine<VertexProgram>::execute_vprog(vertex_id_type vid) {
+
     // instantiate vertex program
     VertexProgram vprog;
     vertex_type& cur = g.vertex(vid);
@@ -439,7 +444,7 @@ void async_engine<VertexProgram>::execute_vprog(vertex_id_type vid) {
     gather_type accum = gather_type();  // imporant to explicitly call the default constructor for basic data types
                                         // when gather_type is double, int, bool etc...
 
-    vector<vertex_type> loaded_doubcon_neighs;  // used for the special treatment of doubly connected neighbours in SPM.
+    vector<vertex_type *> loaded_doubcon_neighs;  // used for the special treatment of doubly connected neighbours in SPM.
 
     if (caching_enabled && has_cache[vid]) {
         accum = gather_cache[vid];
@@ -471,7 +476,7 @@ void async_engine<VertexProgram>::execute_vprog(vertex_id_type vid) {
                     /**
                      * Out edges are loaded even if gather_dir == graphlab::IN_EDGES. 
                      * Scatters begin with out edges so even if gather skips them, the loads
-                     * wil heuristically be used (since often scatter contains out edges)
+                     * will heuristically be used (since often scatter contains out edges)
                      */
                     edge_type *load_ahead_edgeptr = cur.out_edges[i + load_ahead_distance - cur.in_edges.size()];
                     if (!is_same<edge_data_type, graphlab::empty>::value) {
@@ -490,7 +495,7 @@ void async_engine<VertexProgram>::execute_vprog(vertex_id_type vid) {
                  * Whether the data is present in SPM is still checked in order
                  * to analyse the SPM hit rate.
                  */
-                cerr << "gather in edges, v: " << cur.id() << " i: " << i << " s: " << (cur.in_edges[i])->source().id();
+                //cerr << "gather in edges, v: " << cur.id() << " i: " << i << " s: " << (cur.in_edges[i])->source().id();
                 check_spm_hit(*(cur.in_edges[i]), (cur.in_edges[i])->source());
                 
                 // execute the actual gather
@@ -507,7 +512,8 @@ void async_engine<VertexProgram>::execute_vprog(vertex_id_type vid) {
                 if (!(cur.in_edges[i]->has_opposite)) {
                     spmi.remove_vdata((cur.in_edges[i])->source());
                 } else {
-                    loaded_doubcon_neighs.push_back((cur.in_edges[i])->source());
+                    //cerr << "has opp., not removed\n";
+                    loaded_doubcon_neighs.push_back(&(cur.in_edges[i])->source());
                 }
             }
         } else {
@@ -518,7 +524,7 @@ void async_engine<VertexProgram>::execute_vprog(vertex_id_type vid) {
             }
         }
 
-        cerr << "gather_in done v: " << cur.id() << endl;
+        // << "gather_in done v: " << cur.id() << endl;
         // Loop over out edges
         if (gather_dir == graphlab::OUT_EDGES || gather_dir == graphlab::ALL_EDGES) {
             for (int i = 0; i < cur.out_edges.size(); i++) {
@@ -569,7 +575,7 @@ void async_engine<VertexProgram>::execute_vprog(vertex_id_type vid) {
      * -----  APPLY PHASE  -----
      */
     vprog.apply(context, cur, accum);
-    cerr << "apply done v: " << cur.id() << endl;
+    //cerr << "apply done v: " << cur.id() << endl;
     /**
      * -----  SCATTER PHASE  -----
      */
@@ -598,7 +604,7 @@ void async_engine<VertexProgram>::execute_vprog(vertex_id_type vid) {
                     spmi.load_vdata(load_ahead_edgeptr->source());
                 }
             }
-            cerr << "scatter out edges, v: " << cur.id() << " i: " << i;
+            //cerr << "scatter out edges, v: " << cur.id() << " i: " << i;
             check_spm_hit(*(cur.out_edges[i]), (cur.out_edges[i])->target());
 
             vprog.scatter(context, cur, *(cur.out_edges[i]));
@@ -615,7 +621,7 @@ void async_engine<VertexProgram>::execute_vprog(vertex_id_type vid) {
         }
     }
 
-    cerr << "scatter_out done v: " << cur.id() << endl;
+    //cerr << "scatter_out done v: " << cur.id() << endl;
 
     // Loop over in edges
     if (scatter_dir == graphlab::IN_EDGES || scatter_dir == graphlab::ALL_EDGES) {
@@ -643,10 +649,9 @@ void async_engine<VertexProgram>::execute_vprog(vertex_id_type vid) {
     }
 
     // Doubly-connected vertex data should be removed here
-    for (vertex_type v : loaded_doubcon_neighs) {
-        spmi.remove_vdata(v);
+    for (int i = 0; i < loaded_doubcon_neighs.size(); i++) {
+        spmi.remove_vdata(*loaded_doubcon_neighs[i]); 
     }
-
 }
 
 #endif
