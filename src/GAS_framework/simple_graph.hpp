@@ -17,8 +17,8 @@
 #ifndef __SIMPLE_GRAPH_H
 #define __SIMPLE_GRAPH_H
 
-#include <list> // adjancecy lists of vertices
-#include <vector> // 
+#include <vector>
+#include <algorithm> // for std::find
 
 /** 
  * An adjacency list-based graph structure
@@ -38,8 +38,8 @@ public:
 
     struct vertex_type {
         vertex_id_type vid;     // it might be unnecessary to store this again.
-        std::list<edge_type*> out_edges;
-        std::list<edge_type*> in_edges;
+        std::vector<edge_type*> out_edges;
+        std::vector<edge_type*> in_edges;
         VertexData vdata;
 
         /**
@@ -78,18 +78,20 @@ public:
         vertex_id_type target_vid; 
         EdgeData edata;
 
+        bool has_opposite;  // true if the graph contains an edge from target to source.
+
         /**
          * TODO: the constructor copies the data. What is the better alternative?
          * hold a pointer to vertexdata instead? Is that unnecessary complication?
          */
         edge_type(Graph& graph_ref, vertex_id_type source, vertex_id_type target, const EdgeData& data)
-            : graph_ref(graph_ref), source_vid(source), target_vid(target), edata(data) {}
+            : graph_ref(graph_ref), source_vid(source), target_vid(target), edata(data), has_opposite(false) {}
 
-        vertex_type source() const {
+        vertex_type &source() const {
             return *(graph_ref.vertices.at(source_vid));
         }
 
-        vertex_type target() const {
+        vertex_type &target() const {
             return *(graph_ref.vertices.at(target_vid));
         }
 
@@ -140,6 +142,14 @@ public:
         }
 
         edge_type *e = new edge_type(*this, source ,target, edata);
+
+        // set has_opposite if needed
+        for (int i = 0; i < vertices[target]->out_edges.size(); i++) {
+            if (vertices[target]->out_edges[i]->target().id() == source) {
+                e->has_opposite = true;
+                vertices[target]->out_edges[i]->has_opposite = true;
+            }
+        }
 
         vertices[source]->out_edges.push_back(e);
         vertices[target]->in_edges.push_back(e);

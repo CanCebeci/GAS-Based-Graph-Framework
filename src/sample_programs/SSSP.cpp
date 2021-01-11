@@ -11,8 +11,8 @@ const string in_graph_filename = "generated_graph_SSSP.txt";
 const string out_filename = "SSSP_output.txt";
 
 
-typedef int vertex_data;
-typedef int edge_data;
+typedef long int vertex_data;
+typedef long int edge_data;
 typedef Graph<vertex_data, edge_data> graph_type;
 
 struct min_container {
@@ -74,6 +74,15 @@ public:
 };
 
 int main(int argc, char** argv) {
+    if (argc != 3) {
+        cerr << "Wrong number of arguments" << endl;
+        return -1;
+    }
+
+    int load_ahead_distance = atoi(argv[1]);
+    int num_threads = atoi(argv[2]);
+
+
     graph_type graph;
 
     /**
@@ -108,7 +117,7 @@ int main(int argc, char** argv) {
     input_graph.close();
 
     // --- execute program
-    async_engine<SSSP_program> engine(graph, false);
+    async_engine<SSSP_program> engine(graph, load_ahead_distance, num_threads, false);
     engine.signal_all();
     engine.start();
 
@@ -124,4 +133,6 @@ int main(int argc, char** argv) {
     }
     out_file.close();
 
+    cout << "SPM hits: " << engine.spm_hits << endl;
+    cout << "SPM misses: " << engine.spm_misses << endl;
 }
